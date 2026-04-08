@@ -9,8 +9,12 @@ const extractQuestion = require("./src/scripts/questionExtract");
 const PORT = process.env.PORT || 3000;
 
 const server = http.createServer(app);
+const allowedOrigins = app.locals.allowedOrigins || [];
 const io = new Server(server, {
-    cors: "*"
+    cors: {
+        origin: allowedOrigins,
+        credentials: true
+    }
 });
 
 const startServer = async () => {
