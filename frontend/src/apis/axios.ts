@@ -1,7 +1,9 @@
 import axios from 'axios';
 
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://duelcode.onrender.com';
+
 const api=axios.create({
-    baseURL:"http://localhost:3000"
+    baseURL:BACKEND_URL
 });
 
 api.interceptors.request.use((config) => {
