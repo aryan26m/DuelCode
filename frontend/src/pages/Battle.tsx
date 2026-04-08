@@ -48,7 +48,7 @@ const Battle = () => {
 
   useEffect(() => {
     if (!currentUserId) {
-      navigate('/login');
+      navigate('/');
       return;
     }
 

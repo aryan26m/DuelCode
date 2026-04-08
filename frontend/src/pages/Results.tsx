@@ -22,7 +22,7 @@ const Results = () => {
 
   useEffect(() => {
     if (!currentUserId) {
-      navigate('/login');
+      navigate('/');
     }
   }, [currentUserId, navigate]);
 

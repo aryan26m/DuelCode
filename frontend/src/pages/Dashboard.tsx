@@ -70,8 +70,9 @@ const Dashboard = () => {
 
   useEffect(() => {
     const userId = localStorage.getItem('userId');
-    if (!userId) {
-      navigate('/login');
+    const token = localStorage.getItem('token');
+    if (!userId || !token) {
+      navigate('/');
       return;
     }
 
@@ -134,7 +135,7 @@ const Dashboard = () => {
   const handleLogout = () => {
     localStorage.clear();
     socket.disconnect();
-    navigate('/login');
+    navigate('/');
   };
 
   return (

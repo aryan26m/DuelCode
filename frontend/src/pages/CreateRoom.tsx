@@ -22,7 +22,7 @@ const CreateRoom = () => {
     // 1. Auth Guard
     const userId = localStorage.getItem('userId');
     if (!userId) {
-      navigate('/login');
+      navigate('/');
       return;
     }
 

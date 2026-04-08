@@ -12,7 +12,7 @@ const JoinRoom = () => {
     useEffect(()=>{
       const userId=localStorage.getItem('userId');
       if(!userId){
-        navigate('/login');
+        navigate('/');
         return;
       }
       if(!socket.connected) socket.connect();
