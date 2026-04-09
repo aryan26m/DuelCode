@@ -1,6 +1,13 @@
 import axios from 'axios';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://duelcode.onrender.com';
+const runningOnLocalHost =
+    typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
+const BACKEND_URL =
+    import.meta.env.VITE_BACKEND_URL ||
+    (import.meta.env.DEV || runningOnLocalHost
+        ? 'http://localhost:3000'
+        : 'https://duelcode.onrender.com');
 const PUBLIC_ENDPOINTS = [
     '/api/auth/login',
     '/api/auth/register',
@@ -13,12 +20,15 @@ const isPublicEndpoint = (url = '') => {
 };
 
 const api=axios.create({
-    baseURL:BACKEND_URL
+    baseURL:BACKEND_URL,
+    withCredentials:true
 });
 
 api.interceptors.request.use((config) => {
     const token = localStorage.getItem('token');
-    if (token) {
+    const requestUrl = config.url || '';
+
+    if (token && !isPublicEndpoint(requestUrl)) {
         config.headers.Authorization = `Bearer ${token}`;
     }
     return config;

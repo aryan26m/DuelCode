@@ -5,6 +5,10 @@ import api from "../apis/axios";
 import { useNavigate } from "react-router-dom";
 import { socket } from '../socket'; 
 
+const getApiErrorMessage = (err: any, fallback: string) => {
+  return err?.response?.data?.message || fallback;
+};
+
 const LoginCard = () => {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
@@ -22,14 +26,20 @@ const LoginCard = () => {
     try{
       setError("");
       setIsSubmitting(true);
-      const response=await api.post("/api/auth/login",{email,password});
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const response=await api.post("/api/auth/login",{
+        email: normalizedEmail,
+        password
+      });
+
       localStorage.setItem("token",response.data.token);
       localStorage.setItem('userId', response.data.user.id);
       socket.connect();
       navigate("/dashboard");
     }
     catch(err){
-      setError("Login failed. Please check your credentials and try again.");
+      setError(getApiErrorMessage(err, "Login failed. Please check your credentials and try again."));
     }
     finally {
       setIsSubmitting(false);

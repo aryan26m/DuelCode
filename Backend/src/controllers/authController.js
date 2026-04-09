@@ -121,12 +121,20 @@ async function register(req,res){
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
 
-        await sendRegistrationOtpEmail({
-            userEmail: normalizedEmail,
-            username: normalizedUsername,
-            otp,
-            expiryMinutes: OTP_EXPIRY_MINUTES,
-        });
+        try {
+            await sendRegistrationOtpEmail({
+                userEmail: normalizedEmail,
+                username: normalizedUsername,
+                otp,
+                expiryMinutes: OTP_EXPIRY_MINUTES,
+            });
+        } catch (emailError) {
+            console.error("Failed to send registration OTP email:", emailError);
+
+            return res.status(503).json({
+                message: "OTP could not be sent right now. Please try again in a few minutes."
+            });
+        }
 
         return res.status(200).json({
             message: "OTP sent to your email. Verify OTP to complete registration.",
@@ -255,7 +263,9 @@ async function login(req,res){
             });
         }
 
-        const user=await userModel.findOne({email}).select("+password");
+        const normalizedEmail = String(email).trim().toLowerCase();
+
+        const user=await userModel.findOne({email: normalizedEmail}).select("+password");
         if(!user){
             return res.status(400).json({
                 message:"Invalid credentials"
