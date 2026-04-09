@@ -17,6 +17,10 @@ const hasOAuthConfig =
 const hasPasswordConfig = Boolean(process.env.EMAIL_PASS);
 const EMAIL_AUTH_MODE = String(process.env.EMAIL_AUTH_MODE || 'auto').trim().toLowerCase();
 const EMAIL_VERIFY_ON_BOOT = String(process.env.EMAIL_VERIFY_ON_BOOT || 'false').toLowerCase() === 'true';
+const EMAIL_USE_GMAIL_API_FALLBACK = String(process.env.EMAIL_USE_GMAIL_API_FALLBACK || 'true').toLowerCase() === 'true';
+
+let gmailAccessTokenCache = null;
+let gmailAccessTokenExpiryMs = 0;
 
 const buildAuthConfig = () => {
   if (!process.env.EMAIL_USER) {
@@ -175,6 +179,155 @@ const isRetriableSmtpError = (error) => {
   ].includes(code);
 };
 
+const canUseGmailApiFallback = () => {
+  return EMAIL_USE_GMAIL_API_FALLBACK && hasOAuthConfig && Boolean(process.env.EMAIL_USER);
+};
+
+const buildBase64Url = (value) => {
+  return Buffer.from(value, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+};
+
+const buildRawGmailMessage = ({ from, to, subject, text, html }) => {
+  const boundary = `duelcode-boundary-${Date.now()}`;
+  const safeSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
+  const plainTextBody = String(text || '').replace(/\r?\n/g, '\r\n');
+  const htmlBody = String(html || text || '').replace(/\r?\n/g, '\r\n');
+
+  const mimeBody = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${safeSubject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit',
+    '',
+    plainTextBody,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit',
+    '',
+    htmlBody,
+    '',
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
+
+  return buildBase64Url(mimeBody);
+};
+
+const getGmailAccessToken = async () => {
+  const now = Date.now();
+
+  if (gmailAccessTokenCache && now < gmailAccessTokenExpiryMs - 60 * 1000) {
+    return gmailAccessTokenCache;
+  }
+
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: process.env.CLIENT_ID,
+      client_secret: process.env.CLIENT_SECRET,
+      refresh_token: process.env.REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+    }),
+  });
+
+  const tokenResponseText = await tokenResponse.text();
+  if (!tokenResponse.ok) {
+    const error = new Error(`Gmail token request failed (${tokenResponse.status}): ${tokenResponseText}`);
+    error.code = 'GMAIL_TOKEN_REQUEST_FAILED';
+    throw error;
+  }
+
+  let tokenPayload;
+  try {
+    tokenPayload = JSON.parse(tokenResponseText);
+  } catch (parseError) {
+    const error = new Error('Unable to parse Gmail token response');
+    error.code = 'GMAIL_TOKEN_PARSE_FAILED';
+    throw error;
+  }
+
+  if (!tokenPayload.access_token) {
+    const error = new Error('Gmail token response missing access_token');
+    error.code = 'GMAIL_TOKEN_MISSING';
+    throw error;
+  }
+
+  const expiresInSec = Number(tokenPayload.expires_in || 3600);
+  gmailAccessTokenCache = tokenPayload.access_token;
+  gmailAccessTokenExpiryMs = now + expiresInSec * 1000;
+
+  return gmailAccessTokenCache;
+};
+
+const sendWithGmailApi = async (message) => {
+  if (!canUseGmailApiFallback()) {
+    const error = new Error('Gmail API fallback is not configured');
+    error.code = 'GMAIL_API_CONFIG_MISSING';
+    throw error;
+  }
+
+  const accessToken = await getGmailAccessToken();
+  const raw = buildRawGmailMessage(message);
+
+  const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw }),
+  });
+
+  const sendResponseText = await sendResponse.text();
+  if (!sendResponse.ok) {
+    const error = new Error(`Gmail API send failed (${sendResponse.status}): ${sendResponseText}`);
+    error.code = 'GMAIL_API_SEND_FAILED';
+    throw error;
+  }
+
+  let sendPayload = {};
+  try {
+    sendPayload = sendResponseText ? JSON.parse(sendResponseText) : {};
+  } catch (parseError) {
+    // Non-JSON body should not block successful send.
+  }
+
+  const messageId = sendPayload.id || 'unknown';
+  console.log('Message sent via Gmail API: %s', messageId);
+
+  return {
+    messageId,
+    provider: 'gmail-api',
+  };
+};
+
+const tryGmailApiFallbackIfAvailable = async (message, rootError) => {
+  if (!canUseGmailApiFallback()) {
+    return null;
+  }
+
+  try {
+    console.warn('Trying Gmail API fallback after SMTP failure (%s)', rootError?.code || rootError?.message);
+    return await sendWithGmailApi(message);
+  } catch (gmailApiError) {
+    console.error('Gmail API fallback failed:', gmailApiError);
+    return null;
+  }
+};
+
 const sendWithTransport = async (transporter, message, label) => {
   const info = await transporter.sendMail(message);
   console.log('Message sent via %s: %s', label, info.messageId);
@@ -211,6 +364,11 @@ const sendEmail = async (to, subject, text, html) => {
     );
   } catch (primaryError) {
     if (!fallbackTransporter || !isRetriableSmtpError(primaryError)) {
+      const gmailApiResult = await tryGmailApiFallbackIfAvailable(message, primaryError);
+      if (gmailApiResult) {
+        return gmailApiResult;
+      }
+
       throw primaryError;
     }
 
@@ -233,6 +391,12 @@ const sendEmail = async (to, subject, text, html) => {
         primaryError.code || primaryError.message,
         fallbackError
       );
+
+      const gmailApiResult = await tryGmailApiFallbackIfAvailable(message, fallbackError);
+      if (gmailApiResult) {
+        return gmailApiResult;
+      }
+
       throw fallbackError;
     }
   }
