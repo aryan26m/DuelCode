@@ -16,6 +16,7 @@ const hasOAuthConfig =
 
 const hasPasswordConfig = Boolean(process.env.EMAIL_PASS);
 const EMAIL_AUTH_MODE = String(process.env.EMAIL_AUTH_MODE || 'auto').trim().toLowerCase();
+const EMAIL_VERIFY_ON_BOOT = String(process.env.EMAIL_VERIFY_ON_BOOT || 'false').toLowerCase() === 'true';
 
 const buildAuthConfig = () => {
   if (!process.env.EMAIL_USER) {
@@ -77,7 +78,7 @@ const buildAuthConfig = () => {
 
 const parsePort = (value, fallback) => {
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
 const sanitizeSmtpHost = (value) => {
@@ -98,29 +99,93 @@ const sanitizeSmtpHost = (value) => {
 const SMTP_HOST = sanitizeSmtpHost(process.env.SMTP_HOST);
 const SMTP_PORT = parsePort(process.env.SMTP_PORT, 587);
 const SMTP_SECURE = String(process.env.SMTP_SECURE || (SMTP_PORT === 465 ? 'true' : 'false')).toLowerCase() === 'true';
+const SMTP_CONNECTION_TIMEOUT_MS = parsePort(process.env.SMTP_CONNECTION_TIMEOUT_MS, 20000);
+const SMTP_GREETING_TIMEOUT_MS = parsePort(process.env.SMTP_GREETING_TIMEOUT_MS, 15000);
+const SMTP_SOCKET_TIMEOUT_MS = parsePort(process.env.SMTP_SOCKET_TIMEOUT_MS, 20000);
 
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
+const buildTransportOptions = ({ port, secure }) => {
+  return {
+    host: SMTP_HOST,
+    port,
+    secure,
+    family: 4,
+    requireTLS: !secure,
+    connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+    greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+    socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+    tls: {
+      servername: SMTP_HOST,
+    },
+    auth: buildAuthConfig(),
+  };
+};
+
+const primarySmtpConfig = {
   port: SMTP_PORT,
   secure: SMTP_SECURE,
-  family: 4,
-  requireTLS: !SMTP_SECURE,
-  connectionTimeout: 20000,
-  greetingTimeout: 15000,
-  socketTimeout: 20000,
-  tls: {
-    servername: SMTP_HOST,
-  },
-  auth: buildAuthConfig(),
-});
+};
 
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('Error connecting to email server:', error);
-  } else {
-    console.log('Email server is ready to send messages');
+const fallbackSmtpConfig =
+  SMTP_PORT === 587 && !SMTP_SECURE
+    ? { port: 465, secure: true }
+    : SMTP_PORT === 465 && SMTP_SECURE
+      ? { port: 587, secure: false }
+      : { port: 465, secure: true };
+
+const fallbackIsSameAsPrimary =
+  fallbackSmtpConfig.port === primarySmtpConfig.port &&
+  fallbackSmtpConfig.secure === primarySmtpConfig.secure;
+
+const primaryTransporter = nodemailer.createTransport(buildTransportOptions(primarySmtpConfig));
+const fallbackTransporter = fallbackIsSameAsPrimary
+  ? null
+  : nodemailer.createTransport(buildTransportOptions(fallbackSmtpConfig));
+
+const verifyTransport = (transporter, label) => {
+  transporter.verify((error) => {
+    if (error) {
+      console.error(`Email server verification failed (${label}):`, error.message);
+      return;
+    }
+
+    console.log(`Email server is ready (${label})`);
+  });
+};
+
+if (EMAIL_VERIFY_ON_BOOT) {
+  verifyTransport(primaryTransporter, `primary ${SMTP_HOST}:${primarySmtpConfig.port}`);
+
+  if (fallbackTransporter) {
+    verifyTransport(fallbackTransporter, `fallback ${SMTP_HOST}:${fallbackSmtpConfig.port}`);
   }
-});
+}
+
+const isRetriableSmtpError = (error) => {
+  const code = String(error?.code || '').toUpperCase();
+
+  return [
+    'ETIMEDOUT',
+    'ESOCKET',
+    'ECONNECTION',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'EDNS',
+    'EAI_AGAIN',
+    'ECONNRESET',
+  ].includes(code);
+};
+
+const sendWithTransport = async (transporter, message, label) => {
+  const info = await transporter.sendMail(message);
+  console.log('Message sent via %s: %s', label, info.messageId);
+
+  const previewUrl = nodemailer.getTestMessageUrl(info);
+  if (previewUrl) {
+    console.log('Preview URL: %s', previewUrl);
+  }
+
+  return info;
+};
 
 // Function to send email
 const sendEmail = async (to, subject, text, html) => {
@@ -130,17 +195,47 @@ const sendEmail = async (to, subject, text, html) => {
     throw error;
   }
 
-  const info = await transporter.sendMail({
+  const message = {
     from: `"DuelCode" <${process.env.EMAIL_USER}>`,
     to,
     subject,
     text,
     html,
-  });
+  };
 
-  console.log('Message sent: %s', info.messageId);
-  console.log('Preview URL: %s', nodemailer.getTestMessageUrl(info));
-  return info;
+  try {
+    return await sendWithTransport(
+      primaryTransporter,
+      message,
+      `primary ${SMTP_HOST}:${primarySmtpConfig.port}`
+    );
+  } catch (primaryError) {
+    if (!fallbackTransporter || !isRetriableSmtpError(primaryError)) {
+      throw primaryError;
+    }
+
+    console.warn(
+      'Primary SMTP failed (%s). Retrying with fallback %s:%s',
+      primaryError.code || primaryError.message,
+      SMTP_HOST,
+      fallbackSmtpConfig.port
+    );
+
+    try {
+      return await sendWithTransport(
+        fallbackTransporter,
+        message,
+        `fallback ${SMTP_HOST}:${fallbackSmtpConfig.port}`
+      );
+    } catch (fallbackError) {
+      console.error(
+        'Fallback SMTP failed after primary error (%s):',
+        primaryError.code || primaryError.message,
+        fallbackError
+      );
+      throw fallbackError;
+    }
+  }
 };
 
 module.exports = {sendEmail};
