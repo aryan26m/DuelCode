@@ -18,6 +18,8 @@ const hasPasswordConfig = Boolean(process.env.EMAIL_PASS);
 const EMAIL_AUTH_MODE = String(process.env.EMAIL_AUTH_MODE || 'auto').trim().toLowerCase();
 const EMAIL_VERIFY_ON_BOOT = String(process.env.EMAIL_VERIFY_ON_BOOT || 'false').toLowerCase() === 'true';
 const EMAIL_USE_GMAIL_API_FALLBACK = String(process.env.EMAIL_USE_GMAIL_API_FALLBACK || 'true').toLowerCase() === 'true';
+const EMAIL_DELIVERY_STRATEGY = String(process.env.EMAIL_DELIVERY_STRATEGY || 'auto').trim().toLowerCase();
+const IS_RENDER_RUNTIME = String(process.env.RENDER || '').toLowerCase() === 'true';
 
 let gmailAccessTokenCache = null;
 let gmailAccessTokenExpiryMs = 0;
@@ -103,9 +105,9 @@ const sanitizeSmtpHost = (value) => {
 const SMTP_HOST = sanitizeSmtpHost(process.env.SMTP_HOST);
 const SMTP_PORT = parsePort(process.env.SMTP_PORT, 587);
 const SMTP_SECURE = String(process.env.SMTP_SECURE || (SMTP_PORT === 465 ? 'true' : 'false')).toLowerCase() === 'true';
-const SMTP_CONNECTION_TIMEOUT_MS = parsePort(process.env.SMTP_CONNECTION_TIMEOUT_MS, 20000);
-const SMTP_GREETING_TIMEOUT_MS = parsePort(process.env.SMTP_GREETING_TIMEOUT_MS, 15000);
-const SMTP_SOCKET_TIMEOUT_MS = parsePort(process.env.SMTP_SOCKET_TIMEOUT_MS, 20000);
+const SMTP_CONNECTION_TIMEOUT_MS = parsePort(process.env.SMTP_CONNECTION_TIMEOUT_MS, 7000);
+const SMTP_GREETING_TIMEOUT_MS = parsePort(process.env.SMTP_GREETING_TIMEOUT_MS, 7000);
+const SMTP_SOCKET_TIMEOUT_MS = parsePort(process.env.SMTP_SOCKET_TIMEOUT_MS, 10000);
 
 const buildTransportOptions = ({ port, secure }) => {
   return {
@@ -181,6 +183,23 @@ const isRetriableSmtpError = (error) => {
 
 const canUseGmailApiFallback = () => {
   return EMAIL_USE_GMAIL_API_FALLBACK && hasOAuthConfig && Boolean(process.env.EMAIL_USER);
+};
+
+const resolveEmailDeliveryStrategy = () => {
+  const allowedStrategies = ['auto', 'smtp-first', 'gmail-api-first'];
+  const normalizedStrategy = allowedStrategies.includes(EMAIL_DELIVERY_STRATEGY)
+    ? EMAIL_DELIVERY_STRATEGY
+    : 'auto';
+
+  if (normalizedStrategy === 'smtp-first' || normalizedStrategy === 'gmail-api-first') {
+    return normalizedStrategy;
+  }
+
+  if (IS_RENDER_RUNTIME && canUseGmailApiFallback()) {
+    return 'gmail-api-first';
+  }
+
+  return 'smtp-first';
 };
 
 const buildBase64Url = (value) => {
@@ -314,16 +333,16 @@ const sendWithGmailApi = async (message) => {
   };
 };
 
-const tryGmailApiFallbackIfAvailable = async (message, rootError) => {
+const tryGmailApiIfAvailable = async (message, reason) => {
   if (!canUseGmailApiFallback()) {
     return null;
   }
 
   try {
-    console.warn('Trying Gmail API fallback after SMTP failure (%s)', rootError?.code || rootError?.message);
+    console.warn('Trying Gmail API delivery (%s)', reason?.code || reason?.message || 'unknown reason');
     return await sendWithGmailApi(message);
   } catch (gmailApiError) {
-    console.error('Gmail API fallback failed:', gmailApiError);
+    console.error('Gmail API delivery failed:', gmailApiError);
     return null;
   }
 };
@@ -340,22 +359,7 @@ const sendWithTransport = async (transporter, message, label) => {
   return info;
 };
 
-// Function to send email
-const sendEmail = async (to, subject, text, html) => {
-  if (!to) {
-    const error = new Error('Recipient email is required');
-    error.code = 'EMAIL_RECIPIENT_MISSING';
-    throw error;
-  }
-
-  const message = {
-    from: `"DuelCode" <${process.env.EMAIL_USER}>`,
-    to,
-    subject,
-    text,
-    html,
-  };
-
+const sendWithSmtpChain = async (message) => {
   try {
     return await sendWithTransport(
       primaryTransporter,
@@ -363,8 +367,18 @@ const sendEmail = async (to, subject, text, html) => {
       `primary ${SMTP_HOST}:${primarySmtpConfig.port}`
     );
   } catch (primaryError) {
-    if (!fallbackTransporter || !isRetriableSmtpError(primaryError)) {
-      const gmailApiResult = await tryGmailApiFallbackIfAvailable(message, primaryError);
+    const primaryIsRetriable = isRetriableSmtpError(primaryError);
+
+    // Fast path: in cloud environments, Gmail API over HTTPS is often faster than waiting on extra SMTP retries.
+    if (primaryIsRetriable) {
+      const gmailApiResult = await tryGmailApiIfAvailable(message, primaryError);
+      if (gmailApiResult) {
+        return gmailApiResult;
+      }
+    }
+
+    if (!fallbackTransporter || !primaryIsRetriable) {
+      const gmailApiResult = await tryGmailApiIfAvailable(message, primaryError);
       if (gmailApiResult) {
         return gmailApiResult;
       }
@@ -392,7 +406,7 @@ const sendEmail = async (to, subject, text, html) => {
         fallbackError
       );
 
-      const gmailApiResult = await tryGmailApiFallbackIfAvailable(message, fallbackError);
+      const gmailApiResult = await tryGmailApiIfAvailable(message, fallbackError);
       if (gmailApiResult) {
         return gmailApiResult;
       }
@@ -400,6 +414,38 @@ const sendEmail = async (to, subject, text, html) => {
       throw fallbackError;
     }
   }
+};
+
+// Function to send email
+const sendEmail = async (to, subject, text, html) => {
+  if (!to) {
+    const error = new Error('Recipient email is required');
+    error.code = 'EMAIL_RECIPIENT_MISSING';
+    throw error;
+  }
+
+  const message = {
+    from: `"DuelCode" <${process.env.EMAIL_USER}>`,
+    to,
+    subject,
+    text,
+    html,
+  };
+
+  const strategy = resolveEmailDeliveryStrategy();
+  if (strategy === 'gmail-api-first') {
+    const strategySignal = new Error('gmail-api-first strategy');
+    strategySignal.code = 'DELIVERY_STRATEGY_GMAIL_API_FIRST';
+
+    const gmailApiResult = await tryGmailApiIfAvailable(message, strategySignal);
+    if (gmailApiResult) {
+      return gmailApiResult;
+    }
+
+    console.warn('Gmail API first strategy failed. Falling back to SMTP chain.');
+  }
+
+  return sendWithSmtpChain(message);
 };
 
 module.exports = {sendEmail};

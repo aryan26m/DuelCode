@@ -219,7 +219,9 @@ async function verifyRegisterOtp(req,res){
         await registrationOtpModel.deleteOne({ _id: pendingRegistration._id });
 
         // Welcome email should not block successful account creation.
-        await sendWelcomeEmail(user.email, user.username);
+        sendWelcomeEmail(user.email, user.username).catch((emailError) => {
+            console.error("Failed to send welcome email:", emailError);
+        });
 
         const token=jwt.sign({
             id:user._id,
