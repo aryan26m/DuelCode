@@ -83,7 +83,7 @@ if (Date.now() - battle.startTime > MAX_TIME) {
                 const updatedBattle = await battleModel.findOneAndUpdate(
                     { _id: battleId, status: { $ne: "completed" } },
                     { winner, status: "completed" },
-                    { new: true }
+                    { returnDocument: "after" }
                 );
 
                 if (updatedBattle) {

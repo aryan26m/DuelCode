@@ -118,7 +118,7 @@ async function register(req,res){
                 otpExpiresAt,
                 attempts: 0,
             },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
+            { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
         );
 
         try {
