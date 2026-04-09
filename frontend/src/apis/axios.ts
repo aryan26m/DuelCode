@@ -3,11 +3,13 @@ import axios from 'axios';
 const runningOnLocalHost =
     typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
 
+const useRemoteBackendInDev = String(import.meta.env.VITE_USE_REMOTE_BACKEND || '').toLowerCase() === 'true';
+const shouldUseLocalBackend = (import.meta.env.DEV || runningOnLocalHost) && !useRemoteBackendInDev;
+
 const BACKEND_URL =
-    import.meta.env.VITE_BACKEND_URL ||
-    (import.meta.env.DEV || runningOnLocalHost
+    shouldUseLocalBackend
         ? 'http://localhost:3000'
-        : 'https://duelcode.onrender.com');
+        : import.meta.env.VITE_BACKEND_URL || 'https://duelcode.onrender.com';
 const PUBLIC_ENDPOINTS = [
     '/api/auth/login',
     '/api/auth/register',
