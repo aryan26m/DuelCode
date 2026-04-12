@@ -9,7 +9,7 @@ const shouldUseLocalBackend = (import.meta.env.DEV || runningOnLocalHost) && !us
 const BACKEND_URL =
     shouldUseLocalBackend
         ? 'http://localhost:3000'
-        : import.meta.env.VITE_BACKEND_URL || 'https://duelcode.onrender.com';
+        : import.meta.env.VITE_BACKEND_URL || 'https://api.duelcode.me';
 
 export const socket = io(BACKEND_URL, {
     autoConnect: false,

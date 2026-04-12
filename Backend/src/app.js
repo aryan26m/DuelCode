@@ -7,6 +7,7 @@ const {sendEmail} =require("./services/email.service");
 const normalizeOrigin = (origin = "") => origin.trim().replace(/\/$/, "");
 
 const allowedOrigins = (process.env.FRONTEND_URLS || [
+  "https://www.duelcode.me",
   "http://localhost:5173",
   "http://localhost:8080",
   "https://duel-code-brown.vercel.app"
