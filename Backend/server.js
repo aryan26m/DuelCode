@@ -4,7 +4,6 @@ const http = require("http");
 const { Server } = require("socket.io");
 const app = require("./src/app");
 const connectDb = require("./src/config/db");
-const extractQuestion = require("./src/scripts/questionExtract");
 
 const PORT = process.env.PORT || 3000;
 
