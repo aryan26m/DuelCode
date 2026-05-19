@@ -35,4 +35,3 @@ app.get("/", (req, res) => {
     res.send("Welcome to the Question Extraction API"); ``
 })
 startServer();
-
